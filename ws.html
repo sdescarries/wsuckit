@@ -1,0 +1,50 @@
+<html>
+<body id="main">see developer console</body>
+<script>
+
+function send(socket, message) {
+  alert(`send ${message}`);
+  socket.send(message);
+
+}
+
+function open(socket, _ev) {
+  alert(`open`);
+  send(socket, 'ping');
+}
+
+function close(socket, _ev) {
+  alert(`close`);
+}
+
+function message(socket, ev) {
+  alert(`recv ${ev.data}`);
+  if (ev.data === 'pong') {
+    send(socket, 'close');
+  }
+}
+
+function error(_socket, ev) {
+  if (ev instanceof ErrorEvent) {
+    alert(`⚠️ ${ev.message}`);
+  } else {
+    alert(`⚠️ ${ev.type}`);
+  }
+}
+
+const url = new URL(document.location.href);
+
+url.pathname = '';
+url.protocol = 'ws';
+
+alert(`Initiate WS on ${url.href}`);
+
+const socket = new WebSocket(url.href);
+
+socket.onopen = (ev) => open(socket, ev);
+socket.onmessage = (ev) => message(socket, ev);
+socket.onclose = (ev) => close(socket, ev);
+socket.onerror = (ev) => error(socket, ev);
+
+</script>
+</html>
