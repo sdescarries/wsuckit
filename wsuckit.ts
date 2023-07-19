@@ -11,6 +11,16 @@ class MultiCaster {
 
   constructor(channel: string) {
     this.channel = channel;
+    this.listen();
+  }
+
+  static register(con: Connection) {
+    let caster = multi.get(con.channel);
+    if (caster == null) {
+      caster = new MultiCaster(con.channel);
+      multi.set(con.channel, caster);
+    }
+    caster.add(con);
   }
 
   async listenLoop(sub: RedisSubscription) {
@@ -162,6 +172,7 @@ async function reqHandler(request: Request) {
   const { socket, response } = Deno.upgradeWebSocket(request);
 
   const connection = new Connection({ socket, channel, request });
+  MultiCaster.register(connection);
 
   return response;
 }
