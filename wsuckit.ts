@@ -11,7 +11,6 @@ class MultiCaster {
 
   constructor(channel: string) {
     this.channel = channel;
-    this.listen();
   }
 
   static register(con: Connection) {
@@ -19,8 +18,19 @@ class MultiCaster {
     if (caster == null) {
       caster = new MultiCaster(con.channel);
       multi.set(con.channel, caster);
+      caster.listen();
     }
+    console.log(`Register`);
     caster.add(con);
+  }
+
+  static unregister(con: Connection) {
+    const caster = multi.get(con.channel);
+    if (caster == null) {
+      return;
+    }
+    console.log(`Unregister`);
+    caster.rem(con);
   }
 
   async listenLoop(sub: RedisSubscription) {
@@ -28,17 +38,21 @@ class MultiCaster {
     console.log(`[${this.channel}] start listenLoop`);
 
     for await (const { channel, message } of sub.receive()) {
-      console.log({ channel, message });
+      console.log('redis', { channel, message });
       this.connections.forEach(con => con.send(message));
     }
 
-    console.log(`[${this.channel}] stop listenLoop`);
   }
 
-  listen = () =>
-    redis
-      .subscribe(this.channel)
-      .then(sub => this.listenLoop(sub));
+  async listen() {
+    // while (multi.has(this.channel)) {
+      await redis
+        .subscribe(this.channel)
+        .then(sub => this.listenLoop(sub))
+        .catch(console.error);
+    // }
+    console.log(`[${this.channel}] stop listenLoop`);
+  }
 
   add(con: Connection) {
     console.log(`[${this.channel}] add listener`);
@@ -64,6 +78,7 @@ interface ConnectionParams {
 
 class Connection implements ConnectionParams {
 
+  client: string;
   channel: string;
   request: Request;
   socket: WebSocket;
@@ -73,30 +88,12 @@ class Connection implements ConnectionParams {
     this.channel = params.channel;
     this.request = params.request;
     this.socket = params.socket;
+    this.client = this.request.headers.get('host') ?? 'unknown';
 
     this.socket.onopen = (ev: Event) => this.open(ev);
     this.socket.onmessage = (ev: MessageEvent) => this.message(ev);
     this.socket.onclose = (ev: CloseEvent) => this.close(ev);
     this.socket.onerror = (ev: Event | ErrorEvent) => this.error(ev);
-
-    this.listen();
-  }
-
-  async listenLoop(sub: RedisSubscription) {
-    this.sub = sub;
-    while(!sub.isClosed) {
-      for await (const { channel, message } of sub.receive()) {
-        console.log({ channel, message });
-        this.send(message);
-      }
-    }
-  }
-
-  listen() {
-    redis
-      .subscribe(this.channel)
-      .then(sub => this.listenLoop(sub))
-      .catch(error => this.error(error));
   }
 
   send(message: string) {
@@ -105,17 +102,23 @@ class Connection implements ConnectionParams {
   }
 
   open(_ev: Event): void {
-    console.log(`open ${this.channel} ${this.request.headers.get('host')}`);
+    console.log(`open ${this.channel} ${this.client}`);
+    MultiCaster.register(this);
   }
 
   close(_ev: CloseEvent): void {
     console.log(`close`);
+    MultiCaster.unregister(this);
   }
 
   message(ev: MessageEvent): void {
     console.log(`recv ${ev.data}`);
     if (ev.data === 'ping') {
-      this.send('pong');
+      redis
+        .publish(this.channel, ev.data)
+        .catch(console.error);
+
+      //this.send('pong');
     }
 
     if (ev.data === 'close') {
@@ -167,14 +170,14 @@ async function reqHandler(request: Request) {
 
   const channel = url.pathname;
 
-  console.log(`😀 ${channel}`);
+  console.log(`WS Upgrade ${channel}`);
 
   const { socket, response } = Deno.upgradeWebSocket(request);
-
-  const connection = new Connection({ socket, channel, request });
-  MultiCaster.register(connection);
+  new Connection({ socket, channel, request });
 
   return response;
 }
 
-serve(reqHandler, { port: 8000 });
+const port = parseInt(Deno.args[0] ?? '8000', 10);
+
+serve(reqHandler, { port });
