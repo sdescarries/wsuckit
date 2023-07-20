@@ -1,21 +1,36 @@
 import { serve } from "https://deno.land/std@0.192.0/http/mod.ts";
 import { createClient, RedisClientType } from 'npm:redis@4.6.7';
 
-const redisClient: RedisClientType = createClient({ url: 'redis://localhost' });
+const redisOptions = {
+  url: 'redis://localhost',
+} as const;
 
-const onRedisError = (err: Error) => console.error(`redisClient: ${err.stack}`);
-redisClient.on('error', onRedisError);
-redisClient.on('connect', () => console.log('redisClient: connect'));
-redisClient.on('ready', () => console.log('redisClient: ready'));
-redisClient.on('end', () => console.log('redisClient: end'));
-redisClient.on('reconnecting', () => console.log('redisClient: reconnecting'));
+
+function createRedisClient(): RedisClientType {
+  const client: RedisClientType = createClient(redisOptions);
+  const onRedisError = (err: Error) => console.error(`redisClient: ${err.stack}`);
+  client.on('error', onRedisError);
+  client.on('connect', () => console.log('redisClient: connect'));
+  client.on('ready', () => console.log('redisClient: ready'));
+  client.on('end', () => console.log('redisClient: end'));
+  client.on('reconnecting', () => console.log('redisClient: reconnecting'));
+  return client;
+}
+
+const redisClient = createRedisClient();
+const multi = new Map<string, MultiCaster>();
 
 await redisClient.connect();
 
-const multi = new Map<string, MultiCaster>();
+const listener = (message: string, channel: string) => {
+  console.log(`[${channel}] sub ${message}`);
+  const send = (con: Connection) => con.send(message);
 
-const listener = (message: string, channel: string) =>
-  multi.get(channel)?.connections?.forEach(con => con.send(message));
+  Promise
+    .resolve()
+    .then(() =>
+      multi.get(channel)?.connections?.forEach(send))
+}
 
 class MultiCaster {
   channel: string;
@@ -25,12 +40,10 @@ class MultiCaster {
   constructor(channel: string) {
     this.channel = channel;
 
-    const sub = this.sub = redisClient.duplicate();
-    sub.on('error', onRedisError);
+    const sub = this.sub = createRedisClient();
     sub
       .connect()
-      .then(() => sub.subscribe(channel, listener))
-      .catch(onRedisError);
+      .then(() => sub.subscribe(channel, listener));
   }
 
   static register(con: Connection) {
@@ -97,30 +110,34 @@ class Connection implements ConnectionParams {
   }
 
   send(message: string) {
-    console.log(`send ${message}`);
+    console.log(`[${this.channel}] send ${message}`);
     this.socket.send(message);
   }
 
   open(_ev: Event): void {
-    console.log(`open ${this.channel} ${this.client}`);
+    console.log(`[${this.channel}] open ${this.client}`);
     MultiCaster.register(this);
   }
 
   close(_ev: CloseEvent): void {
-    console.log(`close`);
+    console.log(`[${this.channel}] close`);
     MultiCaster.unregister(this);
   }
 
   message(ev: MessageEvent): void {
+    console.log(`[${this.channel}] recv ${ev.data}`);
+
     if (ev.data === 'ping') {
-      console.log(`[${this.channel}] recv ${ev.data}`);
+      console.log(`[${this.channel}] pub pong`);
       redisClient
-        .publish(this.channel, ev.data)
+        .publish(this.channel, 'pong')
         .catch(console.error);
+      return;
     }
 
     if (ev.data === 'close') {
       this.socket.close();
+      return;
     }
   }
 
