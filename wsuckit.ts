@@ -1,57 +1,56 @@
 import { serve } from "https://deno.land/std@0.192.0/http/mod.ts";
-import { connect, RedisSubscription } from "https://deno.land/x/redis@v0.30.0/mod.ts";
+import { createClient, RedisClientType } from 'npm:redis@4.6.7';
 
-const redis = await connect({ hostname: "localhost" });
+const redisClient: RedisClientType = createClient({ url: 'redis://localhost' });
+
+const onRedisError = (err: Error) => console.error(`redisClient: ${err.stack}`);
+redisClient.on('error', onRedisError);
+redisClient.on('connect', () => console.log('redisClient: connect'));
+redisClient.on('ready', () => console.log('redisClient: ready'));
+redisClient.on('end', () => console.log('redisClient: end'));
+redisClient.on('reconnecting', () => console.log('redisClient: reconnecting'));
+
+await redisClient.connect();
+
 const multi = new Map<string, MultiCaster>();
+
+const listener = (message: string, channel: string) =>
+  multi.get(channel)?.connections?.forEach(con => con.send(message));
 
 class MultiCaster {
   channel: string;
   connections = new Set<Connection>();
-  sub?: RedisSubscription;
+  sub: RedisClientType;
 
   constructor(channel: string) {
     this.channel = channel;
+
+    const sub = this.sub = redisClient.duplicate();
+    sub.on('error', onRedisError);
+    sub
+      .connect()
+      .then(() => sub.subscribe(channel, listener))
+      .catch(onRedisError);
   }
 
   static register(con: Connection) {
+    console.log(`[${con.channel}] register`);
     let caster = multi.get(con.channel);
     if (caster == null) {
       caster = new MultiCaster(con.channel);
       multi.set(con.channel, caster);
-      caster.listen();
+      console.log(`[${con.channel}] new channel`);
     }
-    console.log(`Register`);
     caster.add(con);
   }
 
   static unregister(con: Connection) {
+    console.log(`[${con.channel}] unregister`);
     const caster = multi.get(con.channel);
     if (caster == null) {
       return;
     }
-    console.log(`Unregister`);
     caster.rem(con);
-  }
-
-  async listenLoop(sub: RedisSubscription) {
-    this.sub = sub;
-    console.log(`[${this.channel}] start listenLoop`);
-
-    for await (const { channel, message } of sub.receive()) {
-      console.log('redis', { channel, message });
-      this.connections.forEach(con => con.send(message));
-    }
-
-  }
-
-  async listen() {
-    // while (multi.has(this.channel)) {
-      await redis
-        .subscribe(this.channel)
-        .then(sub => this.listenLoop(sub))
-        .catch(console.error);
-    // }
-    console.log(`[${this.channel}] stop listenLoop`);
   }
 
   add(con: Connection) {
@@ -64,7 +63,9 @@ class MultiCaster {
     this.connections.delete(con);
 
     if (this.connections.size === 0) {
-      this.sub?.close();
+      console.log(`[${this.channel}] drop channel`);
+      this.sub.unsubscribe(this.channel);
+      this.sub.quit();
       multi.delete(this.channel);
     }
   }
@@ -82,7 +83,6 @@ class Connection implements ConnectionParams {
   channel: string;
   request: Request;
   socket: WebSocket;
-  sub?: RedisSubscription;
 
   constructor(params: ConnectionParams) {
     this.channel = params.channel;
@@ -112,13 +112,11 @@ class Connection implements ConnectionParams {
   }
 
   message(ev: MessageEvent): void {
-    console.log(`recv ${ev.data}`);
     if (ev.data === 'ping') {
-      redis
+      console.log(`[${this.channel}] recv ${ev.data}`);
+      redisClient
         .publish(this.channel, ev.data)
         .catch(console.error);
-
-      //this.send('pong');
     }
 
     if (ev.data === 'close') {
@@ -144,8 +142,6 @@ class Connection implements ConnectionParams {
 
     const reason = detail.join(': ');
     console.error(reason);
-
-    this.sub?.close();
 
     if (this.socket.OPEN) {
       this.socket.close(1002, reason);

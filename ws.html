@@ -2,40 +2,41 @@
 <html>
 <body id="main">
   <button type="button" onclick='ping()'>ping</button>
-  <div id="output"></div>
+  <button type="button" onclick='close()'>close</button>
+  <pre id="output">incoming...</pre>
 </body>
 <script>
 
 const id = Date.now();
+const output = document.getElementById('output');
 
 function send(socket, message) {
 
   if (socket.readyState !== 1) {
     console.warn('Socket not open');
+    return;
   }
 
   console.log(`send ${message}`);
   socket.send(message);
 }
 
-function open(socket, _ev) {
+function onopen(socket, _ev) {
   console.log(`open`);
-  // send(socket, 'ping');
+  output.innerHTML = `${new Date().toISOString()} open`;
 }
 
-function close(socket, _ev) {
+function onclose(socket, _ev) {
   console.log(`close`);
+  output.innerHTML = `${new Date().toISOString()} close`;
 }
 
-function message(socket, ev) {
+function onmessage(socket, ev) {
   console.log(`recv ${ev.data}`);
-  document.getElementById('output').innerHTML = ev.data;
-  if (ev.data === 'pong') {
-    // send(socket, 'close');
-  }
+  output.innerHTML = `${new Date().toISOString()} received ${ev.data}`;
 }
 
-function error(_socket, ev) {
+function onerror(_socket, ev) {
   if (ev instanceof ErrorEvent) {
     console.log(`⚠️ ${ev.message}`);
   } else {
@@ -52,10 +53,10 @@ console.log(`Initiate WS on ${url.href}`);
 
 const socket = new WebSocket(url.href);
 
-socket.onopen = (ev) => open(socket, ev);
-socket.onmessage = (ev) => message(socket, ev);
-socket.onclose = (ev) => close(socket, ev);
-socket.onerror = (ev) => error(socket, ev);
+socket.onopen = (ev) => onopen(socket, ev);
+socket.onmessage = (ev) => onmessage(socket, ev);
+socket.onclose = (ev) => onclose(socket, ev);
+socket.onerror = (ev) => onerror(socket, ev);
 
 window.addEventListener('beforeunload', (event) => {
   event.preventDefault();
@@ -64,6 +65,9 @@ window.addEventListener('beforeunload', (event) => {
 
 const ping = () =>
   send(socket, 'ping');
+
+const close = () =>
+  send(socket, 'close');
 
 </script>
 </html>
