@@ -1,5 +1,7 @@
 import { serve } from "https://deno.land/std@0.192.0/http/mod.ts";
+import { getCookies } from "https://deno.land/std/http/cookie.ts";
 import { createClient, RedisClientType } from 'npm:redis@4.6.7';
+import * as jose from 'npm:jose@4.14.4';
 
 const redisOptions = {
   url: 'redis://localhost',
@@ -19,6 +21,7 @@ function createRedisClient(): RedisClientType {
 
 const redisClient = createRedisClient();
 const multi = new Map<string, MultiCaster>();
+let idx = 0;
 
 await redisClient.connect();
 
@@ -47,19 +50,19 @@ class MultiCaster {
   }
 
   static register(con: Connection) {
-    console.log(`[${con.channel}] register`);
-    let caster = multi.get(con.channel);
+    console.log(`[${con.params.channel}] register`);
+    let caster = multi.get(con.params.channel);
     if (caster == null) {
-      caster = new MultiCaster(con.channel);
-      multi.set(con.channel, caster);
-      console.log(`[${con.channel}] new channel`);
+      caster = new MultiCaster(con.params.channel);
+      multi.set(con.params.channel, caster);
+      console.log(`[${con.params.channel}] new channel`);
     }
     caster.add(con);
   }
 
   static unregister(con: Connection) {
-    console.log(`[${con.channel}] unregister`);
-    const caster = multi.get(con.channel);
+    console.log(`[${con.params.channel}] unregister`);
+    const caster = multi.get(con.params.channel);
     if (caster == null) {
       return;
     }
@@ -84,59 +87,90 @@ class MultiCaster {
   }
 }
 
-interface ConnectionParams {
+type Roles = 'Learner' | 'Instructor';
+
+interface SessionInfo {
   channel: string;
+  refId?: string;
+  roles?: Roles[];
+}
+
+interface ConnectionParams extends SessionInfo {
   request: Request;
   socket: WebSocket;
 }
 
-class Connection implements ConnectionParams {
+class Connection {
+
+  params: ConnectionParams;
 
   client: string;
-  channel: string;
-  request: Request;
-  socket: WebSocket;
 
   constructor(params: ConnectionParams) {
-    this.channel = params.channel;
-    this.request = params.request;
-    this.socket = params.socket;
-    this.client = this.request.headers.get('host') ?? 'unknown';
+    this.params = params;
+    this.client = params.request.headers.get('host') ?? 'unknown';
 
-    this.socket.onopen = (ev: Event) => this.open(ev);
-    this.socket.onmessage = (ev: MessageEvent) => this.message(ev);
-    this.socket.onclose = (ev: CloseEvent) => this.close(ev);
-    this.socket.onerror = (ev: Event | ErrorEvent) => this.error(ev);
+    this.params.socket.onopen = (ev: Event) => this.open(ev);
+    this.params.socket.onmessage = (ev: MessageEvent) => this.message(ev);
+    this.params.socket.onclose = (ev: CloseEvent) => this.close(ev);
+    this.params.socket.onerror = (ev: Event | ErrorEvent) => this.error(ev);
   }
 
   send(message: string) {
-    console.log(`[${this.channel}] send ${message}`);
-    this.socket.send(message);
+    console.log(`[${this.params.channel}] send ${message}`);
+    this.params.socket.send(message);
+
+    // TODO be more selective on what to send to whom
   }
 
   open(_ev: Event): void {
-    console.log(`[${this.channel}] open ${this.client}`);
+    console.log(`[${this.params.channel}] open ${this.client}`);
     MultiCaster.register(this);
+
+    if (!this.params.refId) {
+      return;
+    }
+
+    if (this.params.roles?.includes('Learner')) {
+
+      const message = {
+        t: 'rosterActivity',
+        d: {
+          refId: this.params.refId,
+          status: 'Joined',
+        }
+      }
+
+      redisClient
+        .publish(this.params.channel, JSON.stringify(message))
+        .catch(console.error);
+    }
   }
 
   close(_ev: CloseEvent): void {
-    console.log(`[${this.channel}] close`);
+    console.log(`[${this.params.channel}] close`);
     MultiCaster.unregister(this);
   }
 
   message(ev: MessageEvent): void {
-    console.log(`[${this.channel}] recv ${ev.data}`);
+    console.log(`[${this.params.channel}] recv ${ev.data}`);
 
     if (ev.data === 'ping') {
-      console.log(`[${this.channel}] pub pong`);
+
+      const resp = `pong ${++idx}`;
+
+      console.log(`[${this.params.channel}] pub ${resp}`);
       redisClient
-        .publish(this.channel, 'pong')
+        .publish(this.params.channel, resp)
         .catch(console.error);
+
+      // Does not loopback reliably to the same redis client
+      // listener(resp, this.params.channel);
       return;
     }
 
     if (ev.data === 'close') {
-      this.socket.close();
+      this.params.socket.close();
       return;
     }
   }
@@ -160,19 +194,44 @@ class Connection implements ConnectionParams {
     const reason = detail.join(': ');
     console.error(reason);
 
-    if (this.socket.OPEN) {
-      this.socket.close(1002, reason);
+    if (this.params.socket.OPEN) {
+      this.params.socket.close(1002, reason);
     }
   }
+}
+
+function getUserInfo(request: Request): SessionInfo {
+  const url = new URL(request.url);
+  const channel = url.pathname;
+
+  const info: SessionInfo = {
+    channel,
+  };
+
+  const { Authn } = getCookies(request.headers);
+
+  if (Authn != null) {
+
+    // FIXME verify JWT signature
+    const jwt = jose.decodeJwt(Authn);
+
+    // FIXME verify user has proper role and can access the requested channel
+
+    info.refId = jwt.userRefId as string;
+    info.roles = jwt['http://www.imsglobal.org/imspurl/lis/v1/vocab/person'] as Roles[];
+  }
+
+  console.log(info);
+  return info;
 }
 
 
 async function reqHandler(request: Request) {
 
-  const url = new URL(request.url);
 
   if (request.headers.get("upgrade") != "websocket") {
 
+    const url = new URL(request.url);
     if (url.pathname === 'favicon.ico') {
       return new Response('');
     }
@@ -181,12 +240,15 @@ async function reqHandler(request: Request) {
     return new Response(template, { headers: { 'Content-Type': 'text/html' }});
   }
 
-  const channel = url.pathname;
-
-  console.log(`WS Upgrade ${channel}`);
-
+  const { channel, refId, roles } = getUserInfo(request);
   const { socket, response } = Deno.upgradeWebSocket(request);
-  new Connection({ socket, channel, request });
+  new Connection({
+    channel,
+    refId,
+    request,
+    roles,
+    socket,
+  });
 
   return response;
 }
